@@ -1,0 +1,6 @@
+LIBRARY	AFOSSIL
+
+EXPORTS
+        VDDInitialize
+        VDDInit
+        VDDDispatch               

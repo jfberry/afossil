@@ -1,0 +1,314 @@
+
+bell    equ     7
+cr      equ     13
+lf      equ     10
+eof     equ     26
+
+; Errorlevel values
+
+X_OK            equ     0
+X_ALREADY       equ     1
+X_NO_MPEX       equ     2
+
+
+
+BINARY_VERSION    equ     0100
+
+
+
+; --- Useful macros ---
+
+display macro
+        push ax,dx
+        mov ah,09
+        mov dx,#1
+        int 021
+        pop dx,ax
+        #em
+
+status macro
+        push es, si
+        mov es, 0b800
+        xor si,si
+        es mov b [si], #1
+        pop si, es
+        #em
+
+exit macro
+        mov ah,04c
+        mov al,#1
+        int 021
+        #em
+
+get_vector macro
+        mov ah,035
+        mov al,#1
+        int 021
+        #em
+
+set_vector macro
+        mov ah,025
+        mov al,#1
+        int 021
+        #em
+
+
+; -----------------------------------------------------------------------------
+
+;                                Execution start
+
+; -----------------------------------------------------------------------------
+
+
+
+go:     jmp start
+
+        db cr, 'AFOSSIL 1.0 -- Copyright (c) Adastra Software Ltd'
+        db cr, lf, eof          ; signature
+
+; -----------------------------------------------------------------------------
+
+;                                AFOSSIL AMIS Interrupt
+
+; -----------------------------------------------------------------------------
+
+
+new_2d proc near
+
+        db 080, 0fc                         ; cmp ah,
+amis_function_number:
+        db 00
+
+        jne int_2d_exit
+
+        cmp al, 00
+        je amis_installation_check
+
+	jmp amis_function_unsupported
+
+;        cmp al, 010
+;        jne amis_function_unsupported
+
+;        cs mov ah, [keyboard_status]
+;        cs mov al, [ratsr_status]
+
+        iret
+
+amis_function_unsupported:
+
+        xor al, al
+        iret
+
+amis_installation_check:
+
+        mov al, 0ff
+        mov cx, BINARY_VERSION
+        mov dx, cs
+        mov di, amis_signature
+
+        iret
+
+int_2d_exit:
+
+        cs jmp d old_2d_address
+
+
+
+; -----------------------------------------------------------------------------
+
+;                                AFOSSIL INT 0x14 handler
+
+; -----------------------------------------------------------------------------
+
+
+
+user_14 proc near
+
+	jmp U1
+
+	db 0
+	dw 0, 01954h	
+
+U1:	
+	mov bx, ax		; Store fossil function in BX
+
+; Call DLL function
+
+	cs mov ax, w bop_handle
+	
+	db 0c4h
+	db 0c4h
+	db 58h
+	db 02h
+
+	iret
+
+amis_signature:         db 'Adastra '      ; 8 character author
+                        db 'AFOSSIL '      ; 8 character program name
+                        db 'Adastra NT-bases FOSSIL driver',0
+
+
+
+DLLfilename:	db 'AFOSSIL.DLL',0
+DLLinit:	db 'VDDInit', 0
+DLLdispatch:	db 'VDDDispatch',0
+
+bop_handle	dw ?
+
+old_14_address  dw ?
+old_14_segment  dw ?
+
+old_2d_address  dw ?
+old_2d_segment  dw ?
+
+; -----------------------------------------------------------------------------
+;
+;                            Program startup
+;
+; -----------------------------------------------------------------------------
+
+; This is the section that is called when the program is first run;
+; note: ALL CODE HEREAFTER IS DISCARDED UPON MAKING AFOSSIL RESIDENT.
+
+
+start:
+	display identity
+
+	call check_loaded       ; check if program installed
+
+; Register DLL
+
+	mov si, offset DLLfilename
+	mov di, offset DLLinit
+	mov bx, offset DLLdispatch
+
+; BOP registermodule
+	db 0c4h
+	db 0c4h
+	db 58h
+	db 0h
+
+	jnc registerok
+
+	display DLLRegisterError
+	jmp abort
+
+registerok:
+	mov w bop_handle, ax
+
+        get_vector 014                  ; save old serial port information
+        mov old_14_address,bx
+        mov old_14_segment,es
+
+        mov ds,cs                       ; set new serial port information
+        mov dx,user_14
+        set_vector 014
+
+        get_vector 02d                  ; save old multplexor information
+        mov old_2d_address,bx
+        mov old_2d_segment,es
+
+        mov ds,cs                       ; set new multiplexor information
+        mov dx,new_2d
+        set_vector 02d
+
+
+	mov     bx, [002Ch]             ; segment address of environment block
+        mov     es, bx
+        mov     ah, 49h
+        int 21h                         ; release the environment block
+
+; Install in memory as a TSR.
+
+        display installed
+
+        mov dx, start
+        int 027
+
+abort:
+	int 020
+
+
+check_loaded proc near
+        mov si, amis_signature
+        call check_amis
+
+        cmp bx, 0001
+        je no_mpex
+
+        cmp bl, 02
+        je already_installed
+
+        mov [amis_function_number], bh
+        ret
+
+already_installed:
+
+        pop ax
+
+	display already
+        exit X_ALREADY
+
+no_mpex:
+        display no_multiplex;
+        pop ax
+        exit X_NO_MPEX
+
+; ---
+; check_amis:  check to see if a certain AMIS function is in memory
+;              ds:si points to id string, return bx (0001 = all MPX in use,
+;              xx00 = function not found, first free AMIS function is xx,
+;              xx02 = signature found)
+;              cx = version
+; ---
+
+check_amis:
+        xor     ax,ax                   ; AH=mpx #00h, AL=func 00h (instlchk)
+        mov     bx,0001h                ; BH=00h, BL=01h: all mpx numbers in use
+chk_installed_loop:
+        push    ax
+        int     2Dh                     ; check if INT 2D/AH=xx is in use
+        cmp     al,0FFh                 ; multiplex number in use?
+        pop     ax
+        je      chk_installed_inuse
+        or      bl,bl                   ; if BL=00h, we've already seen a free mpx
+        je      chk_installed_next
+        mov     bl,0
+        mov     bh,ah
+        jmp short chk_installed_next
+chk_installed_inuse:
+        mov     es,dx
+
+        push    cx                      ; remember version number
+        mov     cx,16/2                 ; length of signature string
+        cld
+        push    si                      ; remember start of desired signature
+        rep     cmpsw                   ; did we get our signature?
+        pop     si                      ; get back start of desired signature
+        pop     cx                      ; retrieve version
+        stc                             ; assume already installed
+        jnz chk_installed_next
+        mov bl, 2
+        mov bh, ah
+        ret                             ;   and quit if it is
+chk_installed_next:
+        inc     ah
+        jnz     chk_installed_loop
+; not yet installed
+        clc
+        ret
+
+
+	
+identity:	db 'Adastra Fossil 1.0 - Copyright (c) Adastra Software Ltd', cr, lf, lf, '$'
+
+DLLREgisterError:	
+		db 'Problems loading AFOSSIL.DLL$'
+
+installed:
+	        db cr, 'Module installed successfully',cr,lf,'$'
+already:
+		db cr, 'Module already installed', cr, lf, '$'
+
+no_multiplex:
+       		db cr, 'No AMIS multiplex functions available -- installation aborted',cr,lf,'$'
